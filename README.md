@@ -32,3 +32,7 @@ The commits on the main branch are noted in lessons throughout the course and ca
 [commit18]: https://github.com/Melkeydev/fem-project-live/commit/0152bf2362188f2a6e496afe5082ca588376dcbf
 [commit31]: https://github.com/Melkeydev/fem-project-live/commit/0f82adb67aaff0ba7ee51dd8fc5bc1e55cedde07
 [commit32]: https://github.com/Melkeydev/fem-project-live/commit/efb3ae2bad4c15f1f77bb63279da77ae9f075715
+
+## Tests
+
+After the `workout_store_test.go` migration is added, the test will fail due to a foreign key violation. This is becasue the tests create a workout without a `user_id`. Creating a test user for the tests will fix this issue. The `main` branch has the working tests. See [this commit](https://github.com/Melkeydev/fem-project-live/commit/3d6880e49e638b1c319acbbacb3e4fa9bebc53d5) for the fix.
