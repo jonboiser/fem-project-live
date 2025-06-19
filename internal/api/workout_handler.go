@@ -100,6 +100,7 @@ func (wh *WorkoutHandler) HandleUpdateWorkoutByID(w http.ResponseWriter, r *http
 		DurationMinutes *int                 `json:"duration_minutes"`
 		CaloriesBurned  *int                 `json:"calories_burned"`
 		Entries         []store.WorkoutEntry `json:"entries"`
+		Version         int                  `json:"version"`
 	}
 
 	err = json.NewDecoder(r.Body).Decode(&updateWorkoutRequest)
@@ -108,6 +109,8 @@ func (wh *WorkoutHandler) HandleUpdateWorkoutByID(w http.ResponseWriter, r *http
 		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": "invalid request payload"})
 		return
 	}
+
+	existingWorkout.Version = updateWorkoutRequest.Version
 
 	if updateWorkoutRequest.Title != nil {
 		existingWorkout.Title = *updateWorkoutRequest.Title

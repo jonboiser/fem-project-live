@@ -1,6 +1,11 @@
 package store
 
-import "database/sql"
+import (
+	"context"
+	"database/sql"
+	"sync"
+	"time"
+)
 
 type Workout struct {
 	ID              int            `json:"id"`
@@ -10,6 +15,7 @@ type Workout struct {
 	DurationMinutes int            `json:"duration_minutes"`
 	CaloriesBurned  int            `json:"calories_burned"`
 	Entries         []WorkoutEntry `json:"entries"`
+	Version         int            `json:"version"`
 }
 
 type WorkoutEntry struct {
@@ -58,14 +64,33 @@ func (pg *PostgresWorkoutStore) CreateWorkout(workout *Workout) (*Workout, error
 		return nil, err
 	}
 
+	errCh := make(chan error, len(workout.Entries))
+	var wg sync.WaitGroup
+
 	// we also need to insert the entries
 	for _, entry := range workout.Entries {
-		query := `
-    INSERT INTO workout_entries (workout_id, exercise_name, sets, reps, duration_seconds, weight, notes, order_index)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    RETURNING id
-    `
-		err = tx.QueryRow(query, workout.ID, entry.ExerciseName, entry.Sets, entry.Reps, entry.DurationSeconds, entry.Weight, entry.Notes, entry.OrderIndex).Scan(&entry.ID)
+		wg.Add(1)
+
+		go func(entry WorkoutEntry) {
+			defer wg.Done()
+
+			query := `
+      INSERT INTO workout_entries (workout_id, exercise_name, sets, reps, duration_seconds, weight, notes, order_index)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id
+      `
+			err = tx.QueryRow(query, workout.ID, entry.ExerciseName, entry.Sets, entry.Reps, entry.DurationSeconds, entry.Weight, entry.Notes, entry.OrderIndex).Scan(&entry.ID)
+			if err != nil {
+				errCh <- err
+			}
+
+		}(entry)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
 		if err != nil {
 			return nil, err
 		}
@@ -80,13 +105,16 @@ func (pg *PostgresWorkoutStore) CreateWorkout(workout *Workout) (*Workout, error
 }
 
 func (pg *PostgresWorkoutStore) GetWorkoutByID(id int64) (*Workout, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
 	workout := &Workout{}
 	query := `
-  SELECT id, title, description, duration_minutes, calories_burned
+  SELECT id, title, description, duration_minutes, calories_burned, version
   FROM workouts
   WHERE id = $1
   `
-	err := pg.db.QueryRow(query, id).Scan(&workout.ID, &workout.Title, &workout.Description, &workout.DurationMinutes, &workout.CaloriesBurned)
+	err := pg.db.QueryRowContext(ctx, query, id).Scan(&workout.ID, &workout.Title, &workout.Description, &workout.DurationMinutes, &workout.CaloriesBurned, &workout.Version)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -103,7 +131,7 @@ func (pg *PostgresWorkoutStore) GetWorkoutByID(id int64) (*Workout, error) {
   ORDER BY order_index
   `
 
-	rows, err := pg.db.Query(entryQuery, id)
+	rows, err := pg.db.QueryContext(ctx, entryQuery, id)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +159,9 @@ func (pg *PostgresWorkoutStore) GetWorkoutByID(id int64) (*Workout, error) {
 }
 
 func (pg *PostgresWorkoutStore) UpdateWorkout(workout *Workout) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	tx, err := pg.db.Begin()
 	if err != nil {
 		return err
@@ -139,24 +170,22 @@ func (pg *PostgresWorkoutStore) UpdateWorkout(workout *Workout) error {
 
 	query := `
   UPDATE workouts
-  SET title = $1, description = $2, duration_minutes = $3, calories_burned = $4
-  WHERE id = $5
+  SET title = $1, description = $2, duration_minutes = $3, calories_burned = $4, version = version + 1
+  WHERE id = $5 AND version = $6
+  RETURNING version
   `
-	result, err := tx.Exec(query, workout.Title, workout.Description, workout.DurationMinutes, workout.CaloriesBurned, workout.ID)
+
+	var newVersion int
+
+	err = tx.QueryRowContext(ctx, query, workout.Title, workout.Description, workout.DurationMinutes, workout.CaloriesBurned, workout.ID, workout.Version).Scan(&newVersion)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return sql.ErrNoRows
+		}
 		return err
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rowsAffected == 0 {
-		return sql.ErrNoRows
-	}
-
-	_, err = tx.Exec(`DELETE FROM workout_entries WHERE workout_id = $1`, workout.ID)
+	_, err = tx.ExecContext(ctx, `DELETE FROM workout_entries WHERE workout_id = $1`, workout.ID)
 	if err != nil {
 		return err
 	}
@@ -167,7 +196,7 @@ func (pg *PostgresWorkoutStore) UpdateWorkout(workout *Workout) error {
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     `
 
-		_, err := tx.Exec(query,
+		_, err := tx.ExecContext(ctx, query,
 			workout.ID,
 			entry.ExerciseName,
 			entry.Sets,
